@@ -1,4 +1,3 @@
-"""Utility to combine audio from one video with visuals from another and burn transcribed captions."""
 import argparse
 import subprocess
 import sys
@@ -11,11 +10,34 @@ LOCAL_FFMPEG = Path(__file__).parent / "ffmpeg" / "bin" / "ffmpeg.exe"
 FFMPEG_BIN_DIR = (Path(__file__).parent / "ffmpeg" / "bin").resolve()
 os.environ["PATH"] = str(FFMPEG_BIN_DIR) + os.pathsep + os.environ.get("PATH", "")
 
+LOCAL_FFPROBE = Path(__file__).parent / "ffmpeg" / "bin" / "ffprobe.exe"
+
+def _resolve_ffprobe() -> str:
+    p = str(LOCAL_FFPROBE) if LOCAL_FFPROBE.exists() else shutil.which("ffprobe")
+    if not p:
+        raise RuntimeError("ffprobe.exe not found beside ffmpeg or on PATH!")
+    return p
+
+def get_media_duration_seconds(path: Path) -> float:
+    """Return duration in seconds using ffprobe."""
+    ffprobe = _resolve_ffprobe()
+    proc = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffprobe failed for {path}:\n{proc.stderr}")
+    try:
+        return float(proc.stdout.strip())
+    except ValueError:
+        raise RuntimeError(f"Could not parse duration for {path}: {proc.stdout}")
+
 def ensure_ffmpeg_available() -> None:
     """Check whether ffmpeg is available on the system."""
     try:
         subprocess.run([LOCAL_FFMPEG, "-version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except (FileNotFoundError, subprocess.CalledProcessError) as exc:  # pragma: no cover - simple environment check
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc: 
         raise RuntimeError("ffmpeg must be installed and available on PATH.") from exc
 
 
@@ -60,7 +82,6 @@ def format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
-# Characters that must be escaped in ffmpeg filters.
 _FFMPEG_ESCAPE_CHARACTERS = set("\\':,[]();=")
 
 
@@ -75,9 +96,25 @@ def _ffmpeg_escape_for_filter_arg(value: str) -> str:
 
 
 def combine_video_audio_subtitles(video_path: Path, audio_path: Path, subtitles_path: Path, output_path: Path) -> None:
-    # Use explicit 'filename=' so ffmpeg doesn't try to parse the drive letter as options
     sub_arg = _ffmpeg_escape_for_filter_arg(subtitles_path.resolve().as_posix())
-    subtitle_filter = f"subtitles=filename='{sub_arg}'"
+
+    genshin_force_style = (
+        "FontName=Montserrat SemiBold,"
+        "FontSize=48,"
+        "PrimaryColour=&H00E6E6E6,"  
+        "OutlineColour=&H001A1A1A,"   
+        "BackColour=&H64000000,"   
+        "BorderStyle=1,"           
+        "Outline=2.8,"            
+        "Shadow=0.8,"              
+        "Alignment=2,"            
+        "MarginV=40"               
+    )
+
+    subtitle_filter = f"subtitles=filename='{sub_arg}':fontsdir='fonts':force_style='{genshin_force_style}'"
+
+    audio_secs = get_media_duration_seconds(audio_path)
+
     run_ffmpeg_command([
         "ffmpeg",
         "-y",
@@ -85,6 +122,7 @@ def combine_video_audio_subtitles(video_path: Path, audio_path: Path, subtitles_
         "-i", str(audio_path),
         "-map", "0:v:0",
         "-map", "1:a:0",
+        "-t", f"{audio_secs:.3f}",  
         "-c:v", "libx264",
         "-preset", "medium",
         "-crf", "18",
@@ -101,13 +139,14 @@ def transcribe_audio(audio_path: Path, model_name: str, language: str | None) ->
     """Transcribe the provided audio using OpenAI Whisper."""
     try:
         import whisper
-    except ImportError as exc:  # pragma: no cover - runtime dependency check
+    except ImportError as exc: 
         raise RuntimeError(
             "The 'whisper' package is required. Install it via 'pip install openai-whisper'."
         ) from exc
 
     model = whisper.load_model(model_name)
     result = model.transcribe(str(audio_path), language=language)
+    # result = model.transcribe(str(audio_path), language=language, task = "translate") # force English output no matter what language the audio is
     return result.get("segments", [])
 
 
@@ -160,6 +199,16 @@ def main() -> None:
     try:
         audio_path = temp_dir_path / "extracted_audio.wav"
         extract_audio(video_a, audio_path)
+
+        audio_len = get_media_duration_seconds(audio_path)
+        video_b_len = get_media_duration_seconds(video_b)
+
+        if video_b_len + 0.1 < audio_len:
+            sys.exit(
+                f"Error: Visual source (video_b) is too short.\n"
+                f"video_b length = {video_b_len:.2f}s, audio length = {audio_len:.2f}s.\n"
+                f"Please supply a visual that is >= the audio length."
+            )
 
         print("Transcribing audio with Whisper...", flush=True)
         segments = transcribe_audio(audio_path, model_name=args.model, language=args.language)
