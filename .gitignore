@@ -1,7 +1,24 @@
-﻿# binaries & media
+﻿
+config.py
+AutoCreateMotivationalQuotes/backgrounds/
+
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
 ffmpeg/
+
 *.mp4
+*.wav
+*.srt
 *.mov
 *.mkv
 *.avi
-*.exe
+
+*.log
+*.tmp
+.DS_Store
+.vscode/
