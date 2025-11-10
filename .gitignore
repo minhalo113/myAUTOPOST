@@ -1,0 +1,7 @@
+﻿# binaries & media
+ffmpeg/
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.exe
