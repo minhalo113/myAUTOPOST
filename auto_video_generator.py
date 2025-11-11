@@ -209,36 +209,21 @@ def combine_video_audio_subtitles(
     output_path: Path,
     segments: list[dict],
 ) -> None:
-    """
-    Build FFmpeg command using:
-      - short, staged asset names (o000.png, o001.png, ...)
-      - a filter_complex_script file to avoid massive inline arguments
-      - cwd set to the staging dir so all inputs are relative
-    """
-    # --- Prepare staging dir (kept inside the output folder) ---
     stage_dir = output_path.parent / "_ffstage"
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
     stage_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy/relativize primary inputs with short names
-    # (We don't physically copy the big video/audio; we just reference them relatively via cwd for short paths)
-    # To keep names super short, we symlink if possible; else we copy the small stuff only.
-    # For broad compatibility on Windows, we’ll just use relative paths from cwd.
     rel_video = os.path.relpath(str(video_path), str(stage_dir))
     rel_audio = os.path.relpath(str(audio_path), str(stage_dir))
 
-    # Copy the SRT next to stage (short name)
     staged_srt = stage_dir / "subs.srt"
     shutil.copy2(subtitles_path, staged_srt)
 
-    # Fonts: your filter uses fontsdir='fonts'
-    # Ensure a local 'fonts' folder exists (copy if you have one alongside the script)
     script_fonts = Path(__file__).parent / "fonts"
     if script_fonts.exists():
         shutil.copytree(script_fonts, stage_dir / "fonts")
 
-    # Collect overlay images and stage them with short names
     overlay_images = sorted(p for p in EMOTE_ROOT_DIR.rglob("*.png") if p.is_file()) if EMOTE_ROOT_DIR.exists() else []
     staged_overlays: list[str] = []
     for idx, src in enumerate(overlay_images):
@@ -253,14 +238,6 @@ def combine_video_audio_subtitles(
     overlay_events: list[OverlayEvent] = []
 
     base_label = "base0"
-    filter_complex_parts: list[str] = []
-    # 0:v will be video B (visual)
-    filter_complex_parts.append(
-        "[0:v]setpts=PTS-STARTPTS,"
-        "scale=iw*1.1:ih*1.1,"
-        "crop=iw/1.1:ih/1.1:(iw-iw/1.1)/2:(ih-ih/1.1)/2"
-        f"[{base_label}]"
-    )
 
     # Recreate your event logic (unchanged)
     if audio_secs > 0 and staged_overlays:
@@ -367,7 +344,7 @@ def combine_video_audio_subtitles(
     # Build filter graph text (short labels, short file refs)
     genshin_force_style = (
         "FontName=Montserrat SemiBold,"
-        "FontSize=48,"
+        "FontSize=14,"
         "PrimaryColour=&H00E6E6E6,"
         "OutlineColour=&H001A1A1A,"
         "BackColour=&H64000000,"
