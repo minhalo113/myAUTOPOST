@@ -23,4 +23,5 @@ ffmpeg/
 .DS_Store
 .vscode/
 
+_ffstage/
 Genshin Emotes/

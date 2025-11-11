@@ -68,20 +68,100 @@ def ensure_ffmpeg_available() -> None:
         raise RuntimeError("ffmpeg must be installed and available on PATH.") from exc
 
 
-def run_ffmpeg_command(args: list[str], cwd: str | None = None):
+def _format_progress_bar(percent: float, width: int = 30) -> str:
+    clamped = max(0.0, min(100.0, percent))
+    filled = int(round((clamped / 100.0) * width))
+    filled = min(filled, width)
+    bar = "#" * filled + "-" * (width - filled)
+    return f"[{bar}] {clamped:6.2f}%"
+
+
+def run_ffmpeg_command(
+    args: list[str],
+    cwd: str | None = None,
+    *,
+    progress_total_seconds: float | None = None,
+    progress_description: str = "Progress",
+):
     ffmpeg_path = str(LOCAL_FFMPEG) if LOCAL_FFMPEG.exists() else shutil.which("ffmpeg")
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg.exe not found in project folder or system PATH!")
 
     cmd = [ffmpeg_path] + (args[1:] if args and args[0] == "ffmpeg" else args)
-
+    cmd_str = " ".join(cmd)
     # Helpful debug if you ever hit limits again:
     # print("FFmpeg cmd length:", len(" ".join(cmd)))
 
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
-    if result.returncode != 0:
+    if progress_total_seconds is None or progress_total_seconds <= 0:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"FFmpeg failed:\nCommand (len={len(cmd_str)}): {cmd_str}\n{result.stderr}"
+            )
+        return
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        bufsize=1,
+    )
+
+    stderr_lines: list[str] = []
+    last_printed = None
+
+    def _maybe_print(percent: float) -> None:
+        nonlocal last_printed
+        percent = max(0.0, min(100.0, percent))
+        rounded = round(percent, 1)
+        if last_printed is not None and abs(rounded - last_printed) < 0.1:
+            return
+        last_printed = rounded
+        bar = _format_progress_bar(percent)
+        print(f"\r{progress_description}: {bar}", end="", flush=True)
+
+    returncode: int | None = None
+
+    try:
+        _maybe_print(0.0)
+        time_pattern = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+        while True:
+            line = process.stderr.readline()
+            if line == "" and process.poll() is not None:
+                break
+            if not line:
+                continue
+            stderr_lines.append(line)
+            match = time_pattern.search(line)
+            if match:
+                hours = int(match.group(1))
+                minutes = int(match.group(2))
+                seconds = float(match.group(3))
+                elapsed = hours * 3600 + minutes * 60 + seconds
+                percent = (elapsed / progress_total_seconds) * 100.0
+                _maybe_print(percent)
+
+        # Drain any remaining output
+        if process.stdout:
+            process.stdout.read()
+
+        returncode = process.wait()
+        if returncode == 0:
+            _maybe_print(100.0)
+            print()
+        elif last_printed is not None:
+            print()
+    finally:
+        if process.stderr:
+            process.stderr.close()
+        if process.stdout:
+            process.stdout.close()
+
+    if returncode != 0:
         raise RuntimeError(
-            f"FFmpeg failed:\nCommand (len={len(' '.join(cmd))}): {' '.join(cmd)}\n{result.stderr}"
+            f"FFmpeg failed:\nCommand (len={len(cmd_str)}): {cmd_str}\n{''.join(stderr_lines)}"
         )
 
 def extract_audio(video_path: Path, audio_path: Path) -> None:
@@ -359,7 +439,12 @@ def combine_video_audio_subtitles(
     )
 
     # Run with cwd set to stage_dir so everything is short & relative
-    run_ffmpeg_command(final_args, cwd=str(stage_dir))
+    run_ffmpeg_command(
+        final_args,
+        cwd=str(stage_dir),
+        progress_total_seconds=audio_secs,
+        progress_description="Muxing media",
+    )
 
 def transcribe_audio(audio_path: Path, model_name: str, language: str | None) -> list[dict]:
     """Transcribe the provided audio using OpenAI Whisper."""
