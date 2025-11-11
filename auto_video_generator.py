@@ -1,5 +1,6 @@
 import argparse
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -67,20 +68,20 @@ def ensure_ffmpeg_available() -> None:
         raise RuntimeError("ffmpeg must be installed and available on PATH.") from exc
 
 
-def run_ffmpeg_command(args: list[str]):
+def run_ffmpeg_command(args: list[str], cwd: str | None = None):
     ffmpeg_path = str(LOCAL_FFMPEG) if LOCAL_FFMPEG.exists() else shutil.which("ffmpeg")
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg.exe not found in project folder or system PATH!")
 
-    if args[0] == "ffmpeg":
-        cmd = [ffmpeg_path] + args[1:]
-    else:
-        cmd = [ffmpeg_path] + args
+    cmd = [ffmpeg_path] + (args[1:] if args and args[0] == "ffmpeg" else args)
 
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # Helpful debug if you ever hit limits again:
+    # print("FFmpeg cmd length:", len(" ".join(cmd)))
+
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
     if result.returncode != 0:
         raise RuntimeError(
-            f"FFmpeg failed:\nCommand: {' '.join(cmd)}\n{result.stderr}"
+            f"FFmpeg failed:\nCommand (len={len(' '.join(cmd))}): {' '.join(cmd)}\n{result.stderr}"
         )
 
 def extract_audio(video_path: Path, audio_path: Path) -> None:
@@ -128,31 +129,52 @@ def combine_video_audio_subtitles(
     output_path: Path,
     segments: list[dict],
 ) -> None:
-    sub_arg = _ffmpeg_escape_for_filter_arg(subtitles_path.resolve().as_posix())
+    """
+    Build FFmpeg command using:
+      - short, staged asset names (o000.png, o001.png, ...)
+      - a filter_complex_script file to avoid massive inline arguments
+      - cwd set to the staging dir so all inputs are relative
+    """
+    # --- Prepare staging dir (kept inside the output folder) ---
+    stage_dir = output_path.parent / "_ffstage"
+    if stage_dir.exists():
+        shutil.rmtree(stage_dir)
+    stage_dir.mkdir(parents=True, exist_ok=True)
 
-    genshin_force_style = (
-        "FontName=Montserrat SemiBold,"
-        "FontSize=48,"
-        "PrimaryColour=&H00E6E6E6,"
-        "OutlineColour=&H001A1A1A,"
-        "BackColour=&H64000000,"
-        "BorderStyle=1,"
-        "Outline=2.8,"
-        "Shadow=0.8,"
-        "Alignment=2,"
-        "MarginV=40"          
-    )
+    # Copy/relativize primary inputs with short names
+    # (We don't physically copy the big video/audio; we just reference them relatively via cwd for short paths)
+    # To keep names super short, we symlink if possible; else we copy the small stuff only.
+    # For broad compatibility on Windows, we’ll just use relative paths from cwd.
+    rel_video = os.path.relpath(str(video_path), str(stage_dir))
+    rel_audio = os.path.relpath(str(audio_path), str(stage_dir))
 
-    subtitle_filter = f"subtitles=filename='{sub_arg}':fontsdir='fonts':force_style='{genshin_force_style}'"
+    # Copy the SRT next to stage (short name)
+    staged_srt = stage_dir / "subs.srt"
+    shutil.copy2(subtitles_path, staged_srt)
 
-    audio_secs = get_media_duration_seconds(audio_path)
+    # Fonts: your filter uses fontsdir='fonts'
+    # Ensure a local 'fonts' folder exists (copy if you have one alongside the script)
+    script_fonts = Path(__file__).parent / "fonts"
+    if script_fonts.exists():
+        shutil.copytree(script_fonts, stage_dir / "fonts")
 
+    # Collect overlay images and stage them with short names
     overlay_images = sorted(p for p in EMOTE_ROOT_DIR.rglob("*.png") if p.is_file()) if EMOTE_ROOT_DIR.exists() else []
-    overlay_inputs: list[str] = []
-    filter_complex_parts: list[str] = []
+    staged_overlays: list[str] = []
+    for idx, src in enumerate(overlay_images):
+        short_name = f"o{idx:03d}{src.suffix.lower()}"
+        dst = stage_dir / short_name
+        # Copy only filenames you actually use (we’ll index by event below)
+        shutil.copy2(src, dst)
+        staged_overlays.append(short_name)
+
+    # Build events as before
+    audio_secs = get_media_duration_seconds(Path(audio_path))
+    overlay_events: list[OverlayEvent] = []
 
     base_label = "base0"
-
+    filter_complex_parts: list[str] = []
+    # 0:v will be video B (visual)
     filter_complex_parts.append(
         "[0:v]setpts=PTS-STARTPTS,"
         "scale=iw*1.1:ih*1.1,"
@@ -160,16 +182,16 @@ def combine_video_audio_subtitles(
         f"[{base_label}]"
     )
 
-    overlay_events: list[OverlayEvent] = []
-    if audio_secs > 0 and overlay_images:
+    # Recreate your event logic (unchanged)
+    if audio_secs > 0 and staged_overlays:
         rng = random.Random()
 
-        def emote_cycle() -> Iterator[Path]:
-            pool = overlay_images[:]
+        def emote_cycle() -> Iterator[str]:
+            pool = staged_overlays[:]
             while True:
                 rng.shuffle(pool)
-                for img in pool:
-                    yield img
+                for name in pool:
+                    yield name
 
         emote_iter = emote_cycle()
 
@@ -186,7 +208,7 @@ def combine_video_audio_subtitles(
                 fade_time = min(LAYER1_FADE_SECONDS, (main_end - seg_start) / 2)
                 overlay_events.append(
                     OverlayEvent(
-                        image_path=next(emote_iter),
+                        image_path=Path(next(emote_iter)),
                         start=seg_start,
                         end=main_end,
                         scale=0.5,
@@ -209,7 +231,7 @@ def combine_video_audio_subtitles(
                     offset_y = rng.uniform(-50, 50)
                     overlay_events.append(
                         OverlayEvent(
-                            image_path=next(emote_iter),
+                            image_path=Path(next(emote_iter)),
                             start=booster_start,
                             end=booster_end,
                             scale=0.5,
@@ -224,11 +246,9 @@ def combine_video_audio_subtitles(
             "top-left": ("main_w*0.05", "main_h*0.05"),
             "top-right": ("main_w-overlay_w-main_w*0.05", "main_h*0.05"),
             "bottom-left": ("main_w*0.05", "main_h-overlay_h-main_h*0.05"),
-            "bottom-right": (
-                "main_w-overlay_w-main_w*0.05",
-                "main_h-overlay_h-main_h*0.05",
-            ),
+            "bottom-right": ("main_w-overlay_w-main_w*0.05", "main_h-overlay_h-main_h*0.05"),
         }
+
         micro_time = 0.0
         while micro_time < audio_secs:
             micro_time += rng.uniform(LAYER3_MIN_GAP, LAYER3_MAX_GAP)
@@ -241,7 +261,7 @@ def combine_video_audio_subtitles(
             _, (x_expr, y_expr) = rng.choice(list(corner_positions.items()))
             overlay_events.append(
                 OverlayEvent(
-                    image_path=next(emote_iter),
+                    image_path=Path(next(emote_iter)),
                     start=micro_time,
                     end=micro_end,
                     scale=0.25,
@@ -255,80 +275,91 @@ def combine_video_audio_subtitles(
 
     overlay_events.sort(key=lambda evt: evt.start)
 
-    for idx, event in enumerate(overlay_events):
-        overlay_inputs.extend(["-loop", "1", "-i", str(event.image_path)])
+    # Build inputs: [0] = video, [1] = audio, overlays start from [2]
+    input_args = [
+        "-y", "-i", rel_video,
+        "-i", rel_audio,
+    ]
+    for evt in overlay_events:
+        # evt.image_path is a short staged filename like o000.png
+        input_args.extend(["-loop", "1", "-i", str(evt.image_path)])
 
+    # Build filter graph text (short labels, short file refs)
+    genshin_force_style = (
+        "FontName=Montserrat SemiBold,"
+        "FontSize=48,"
+        "PrimaryColour=&H00E6E6E6,"
+        "OutlineColour=&H001A1A1A,"
+        "BackColour=&H64000000,"
+        "BorderStyle=1,"
+        "Outline=2.8,"
+        "Shadow=0.8,"
+        "Alignment=2,"
+        "MarginV=40"
+    )
+    subtitle_filter = f"subtitles=filename='subs.srt':fontsdir='fonts':force_style='{genshin_force_style}'"
+
+    filter_lines = []
+    filter_lines.append(
+        "[0:v]setpts=PTS-STARTPTS,scale=iw*1.1:ih*1.1,"
+        "crop=iw/1.1:ih/1.1:(iw-iw/1.1)/2:(ih-ih/1.1)/2[base0]"
+    )
+
+    base_label = "base0"
     for idx, event in enumerate(overlay_events):
-        input_index = idx + 2
-        scaled_label = f"emote{idx}"
-        next_label = f"base{idx + 1}"
+        input_index = idx + 2  # due to [0]=video, [1]=audio
+        scaled_label = f"e{idx}"
+        next_label = f"base{idx+1}"
         event_duration = max(0.0, event.end - event.start)
         if event_duration <= 0:
             continue
         fade_in = min(event.fade_in, event_duration / 2)
         fade_out = min(event.fade_out, event_duration / 2)
         fade_out_start = event.end - fade_out
-        filter_chain_parts = [
-            f"[{input_index}:v]scale=iw*{event.scale}:ih*{event.scale}",
-            "format=rgba",
+
+        chain = [
+            f"[{input_index}:v]scale=iw*{event.scale}:ih*{event.scale},format=rgba"
         ]
         if event.opacity < 1.0:
-            filter_chain_parts.append(f"colorchannelmixer=aa={event.opacity:.2f}")
-        filter_chain_parts.append(
-            f"fade=t=in:st={event.start:.3f}:d={fade_in:.3f}:alpha=1"
-        )
-        filter_chain_parts.append(
-            f"fade=t=out:st={max(event.start, fade_out_start):.3f}:d={fade_out:.3f}:alpha=1"
-        )
-        filter_complex_parts.append(
-            ",".join(filter_chain_parts) + f"[{scaled_label}]"
-        )
-        filter_complex_parts.append(
+            chain.append(f"colorchannelmixer=aa={event.opacity:.2f}")
+        chain.append(f"fade=t=in:st={event.start:.3f}:d={fade_in:.3f}:alpha=1")
+        chain.append(f"fade=t=out:st={max(event.start, fade_out_start):.3f}:d={fade_out:.3f}:alpha=1")
+        filter_lines.append(",".join(chain) + f"[{scaled_label}]")
+
+        filter_lines.append(
             f"[{base_label}][{scaled_label}]overlay={event.x_expr}:{event.y_expr}:"
             f"enable='between(t,{event.start:.3f},{event.end:.3f})'[{next_label}]"
         )
         base_label = next_label
 
-    filter_complex_parts.append(f"[{base_label}]{subtitle_filter}[finalv]")
-    filter_complex = ";".join(filter_complex_parts)
+    filter_lines.append(f"[{base_label}]{subtitle_filter}[finalv]")
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(video_path),
-        "-i",
-        str(audio_path),
-    ]
+    # Write the filter graph to a file
+    fgraph_path = stage_dir / "graph.ffscript"
+    fgraph_path.write_text(";\n".join(filter_lines), encoding="utf-8")
 
-    cmd.extend(overlay_inputs)
+    # Assemble final args (short!)
+    final_args = (
+        ["ffmpeg"]
+        + input_args
+        + [
+            "-filter_complex_script", "graph.ffscript",
+            "-map", "[finalv]",
+            "-map", "1:a:0",
+            "-t", f"{audio_secs:.3f}",
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-shortest",
+            os.path.relpath(str(output_path), str(stage_dir)),  # write to target path via relative
+        ]
+    )
 
-    cmd.extend([
-        "-filter_complex",
-        filter_complex,
-        "-map",
-        "[finalv]",
-        "-map",
-        "1:a:0",
-        "-t",
-        f"{audio_secs:.3f}",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "medium",
-        "-crf",
-        "18",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-shortest",
-        str(output_path),
-    ])
-    
-    run_ffmpeg_command(cmd)
+    # Run with cwd set to stage_dir so everything is short & relative
+    run_ffmpeg_command(final_args, cwd=str(stage_dir))
 
 def transcribe_audio(audio_path: Path, model_name: str, language: str | None) -> list[dict]:
     """Transcribe the provided audio using OpenAI Whisper."""
