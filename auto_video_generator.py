@@ -26,6 +26,8 @@ LAYER3_MIN_DURATION = 0.4
 LAYER3_MAX_DURATION = 0.7
 LAYER3_FADE_SECONDS = 0.12
 MICRO_EMOTE_OPACITY = 0.8
+MAIN_EMOTE_HEIGHT_PORTION = 0.20
+MICRO_EMOTE_HEIGHT_PORTION = 0.10
 
 @dataclass
 class OverlayEvent:
@@ -365,7 +367,9 @@ def combine_video_audio_subtitles(
     base_label = "base0"
     for idx, event in enumerate(overlay_events):
         input_index = idx + 2  # due to [0]=video, [1]=audio
+        scaled_src_label = f"e{idx}src"
         scaled_label = f"e{idx}"
+        ref_label = f"base{idx}_ref"
         next_label = f"base{idx+1}"
         event_duration = max(0.0, event.end - event.start)
         if event_duration <= 0:
@@ -374,9 +378,18 @@ def combine_video_audio_subtitles(
         fade_out = min(event.fade_out, event_duration / 2)
         fade_out_start = event.end - fade_out
 
-        chain = [
-            f"[{input_index}:v]scale=iw*{event.scale}:ih*{event.scale},format=rgba"
-        ]
+        target_height_ratio = (
+            MAIN_EMOTE_HEIGHT_PORTION
+            if event.scale >= 0.5
+            else MICRO_EMOTE_HEIGHT_PORTION
+        )
+
+        filter_lines.append(
+            f"[{input_index}:v][{base_label}]scale2ref=w=-1:h=ih2*{target_height_ratio:.6f}"
+            f"[{scaled_src_label}][{ref_label}]"
+        )
+
+        chain = [f"[{scaled_src_label}]format=rgba"]
         if event.opacity < 1.0:
             chain.append(f"colorchannelmixer=aa={event.opacity:.2f}")
         chain.append(f"fade=t=in:st={event.start:.3f}:d={fade_in:.3f}:alpha=1")
@@ -384,7 +397,7 @@ def combine_video_audio_subtitles(
         filter_lines.append(",".join(chain) + f"[{scaled_label}]")
 
         filter_lines.append(
-            f"[{base_label}][{scaled_label}]overlay={event.x_expr}:{event.y_expr}:"
+            f"[{ref_label}][{scaled_label}]overlay={event.x_expr}:{event.y_expr}:"
             f"enable='between(t,{event.start:.3f},{event.end:.3f})'[{next_label}]"
         )
         base_label = next_label
