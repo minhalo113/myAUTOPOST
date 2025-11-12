@@ -204,6 +204,37 @@ def _ffmpeg_escape_for_filter_arg(value: str) -> str:
     return s
 
 
+def get_video_dimensions(path: Path) -> tuple[int, int]:
+    """Return the width and height of the first video stream using ffprobe."""
+    ffprobe = _resolve_ffprobe()
+    proc = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffprobe failed for {path}:\n{proc.stderr}")
+
+    try:
+        width_str, height_str = proc.stdout.strip().split("x", maxsplit=1)
+        return int(width_str), int(height_str)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Could not parse video dimensions for {path}: {proc.stdout.strip()}"
+        ) from exc
+
 def combine_video_audio_subtitles(
     video_path: Path,
     audio_path: Path,
@@ -334,6 +365,9 @@ def combine_video_audio_subtitles(
 
     overlay_events.sort(key=lambda evt: evt.start)
 
+    _, base_video_height = get_video_dimensions(video_path)
+
+
     # Build inputs: [0] = video, [1] = audio, overlays start from [2]
     input_args = [
         "-y", "-i", rel_video,
@@ -384,9 +418,9 @@ def combine_video_audio_subtitles(
             else MICRO_EMOTE_HEIGHT_PORTION
         )
 
+        target_height_px = max(1, int(round(base_video_height * target_height_ratio)))
         filter_lines.append(
-            f"[{input_index}:v][{base_label}]scale2ref=w=-1:h=ih2*{target_height_ratio:.6f}"
-            f"[{scaled_src_label}][{ref_label}]"
+            f"[{input_index}:v]scale=w=-1:h={target_height_px}[{scaled_src_label}]"
         )
 
         chain = [f"[{scaled_src_label}]format=rgba"]
@@ -397,7 +431,7 @@ def combine_video_audio_subtitles(
         filter_lines.append(",".join(chain) + f"[{scaled_label}]")
 
         filter_lines.append(
-            f"[{ref_label}][{scaled_label}]overlay={event.x_expr}:{event.y_expr}:"
+            f"[{base_label}][{scaled_label}]overlay={event.x_expr}:{event.y_expr}:"
             f"enable='between(t,{event.start:.3f},{event.end:.3f})'[{next_label}]"
         )
         base_label = next_label
