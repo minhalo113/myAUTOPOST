@@ -160,4 +160,4 @@ def get_transcript():
     return [script, finalize_script, title]
 
 if __name__ == "__main__":
-    long_form_video_transcript("https://www.youtube.com/watch?v=RPn0PiLsAMM")
+    get_transcript()
