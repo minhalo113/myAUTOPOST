@@ -115,26 +115,26 @@ def upload_to_youtube(video_path: Path, title: str, description: str, channel_na
             print("Clicked 'Public' visibility.")
 
             # Click "Publish" button
-            publish_button_selector = "button[aria-label='Publish'], ytcp-button#done-button"
-            page.wait_for_selector(publish_button_selector, state="visible")
-            page.locator(publish_button_selector).click()
-            print("Clicked 'Publish' button. Waiting for upload to finish...")
+            # publish_button_selector = "button[aria-label='Publish'], ytcp-button#done-button"
+            # page.wait_for_selector(publish_button_selector, state="visible")
+            # page.locator(publish_button_selector).click()
+            # print("Clicked 'Publish' button. Waiting for upload to finish...")
             
-            print("Waiting for upload to complete... Please do not close the browser.")
-            try:
-                page.wait_for_selector("ytcp-video-upload-progress:not([uploading])", timeout=1800000)
-            except Exception as wait_e:
-                print(f"Warning during upload wait: {wait_e}. Upload might not have finished.")
+            # print("Waiting for upload to complete... Please do not close the browser.")
+            # try:
+            #     page.wait_for_selector("ytcp-video-upload-progress:not([uploading])", timeout=1800000)
+            # except Exception as wait_e:
+            #     print(f"Warning during upload wait: {wait_e}. Upload might not have finished.")
                 
-            page.wait_for_timeout(5000)
+            # page.wait_for_timeout(5000)
             
-            print("Video uploaded and published successfully!")
+            # print("Video uploaded and published successfully!")
             
         except Exception as e:
             print(f"YouTube Automation Error: {e}")
             raise
-        finally:
-            browser_context.close()
+        # finally:
+            # browser_context.close()
 
 if __name__ == "__main__":
     # Test script run

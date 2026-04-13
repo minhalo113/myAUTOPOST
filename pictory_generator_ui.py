@@ -217,7 +217,7 @@ class PictoryGeneratorUI:
                     youtube_channel_name=self.youtube_channel_var.get(),
                     youtube_channel_url=self.channels_dict.get(self.youtube_channel_var.get())
                 )
-                self.root.after(0, lambda: messagebox.showinfo("Success", f"Video generated successfully:\n{output_path}"))
+                # self.root.after(0, lambda: messagebox.showinfo("Success", f"Video generated successfully:\n{output_path}"))
             except Exception as e:
                 self.root.after(0, lambda e=e: messagebox.showerror("Error", str(e)))
             finally:
