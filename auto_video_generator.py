@@ -16,6 +16,7 @@ os.environ["PATH"] = str(FFMPEG_BIN_DIR) + os.pathsep + os.environ.get("PATH", "
 
 LOCAL_FFPROBE = Path(__file__).parent / "ffmpeg" / "bin" / "ffprobe.exe"
 EMOTE_ROOT_DIR = Path(__file__).parent / "Genshin Emotes"
+STAGED_EMOTE_DIR = Path(__file__).parent / "__ffstage"
 LAYER1_DURATION_PORTION = 0.40
 LAYER1_FADE_SECONDS = 0.15
 LAYER2_TRIGGER_THRESHOLD = 4.0
@@ -195,12 +196,10 @@ _FFMPEG_ESCAPE_CHARACTERS = set("\\':,[]();=")
 
 
 def _ffmpeg_escape_for_filter_arg(value: str) -> str:
-    # For libavfilter args: escape backslash, colon, single-quote, spaces
-    # Use forward slashes to avoid Windows backslash hell
     s = value.replace("\\", "/")
-    s = s.replace(":", r"\:")      # escape drive colon C:\ -> C\:/
-    s = s.replace("'", r"\'")      # escape single quotes
-    s = s.replace(" ", r"\ ")      # escape spaces
+    s = s.replace(":", r"\:") 
+    s = s.replace("'", r"\'")   
+    s = s.replace(" ", r"\ ")    
     return s
 
 
@@ -257,23 +256,29 @@ def combine_video_audio_subtitles(
     if script_fonts.exists():
         shutil.copytree(script_fonts, stage_dir / "fonts")
 
-    overlay_images = sorted(p for p in EMOTE_ROOT_DIR.rglob("*.png") if p.is_file()) if EMOTE_ROOT_DIR.exists() else []
+    if STAGED_EMOTE_DIR.exists():
+        overlay_images = sorted(
+            p for p in STAGED_EMOTE_DIR.rglob("*.png") if p.is_file()
+        )
+    elif EMOTE_ROOT_DIR.exists():
+        overlay_images = sorted(
+            p for p in EMOTE_ROOT_DIR.rglob("*.png") if p.is_file()
+        )
+    else:
+        overlay_images = []
     staged_overlays: list[str] = []
     for idx, src in enumerate(overlay_images):
         short_name = f"o{idx:03d}{src.suffix.lower()}"
         dst = stage_dir / short_name
-        # Copy only filenames you actually use (we’ll index by event below)
         shutil.copy2(src, dst)
         staged_overlays.append(short_name)
 
-    # Build events as before
     audio_secs = get_media_duration_seconds(Path(audio_path))
     overlay_events: list[OverlayEvent] = []
 
     base_label = "base0"
 
-    # Recreate your event logic (unchanged)
-    if audio_secs > 0 and staged_overlays:
+    if audio_secs > 0 and staged_overlays and False:
         rng = random.Random()
 
         def emote_cycle() -> Iterator[str]:
@@ -368,16 +373,13 @@ def combine_video_audio_subtitles(
     _, base_video_height = get_video_dimensions(video_path)
 
 
-    # Build inputs: [0] = video, [1] = audio, overlays start from [2]
     input_args = [
         "-y", "-i", rel_video,
         "-i", rel_audio,
     ]
     for evt in overlay_events:
-        # evt.image_path is a short staged filename like o000.png
         input_args.extend(["-loop", "1", "-i", str(evt.image_path)])
 
-    # Build filter graph text (short labels, short file refs)
     genshin_force_style = (
         "FontName=Montserrat SemiBold,"
         "FontSize=14,"
@@ -400,7 +402,7 @@ def combine_video_audio_subtitles(
 
     base_label = "base0"
     for idx, event in enumerate(overlay_events):
-        input_index = idx + 2  # due to [0]=video, [1]=audio
+        input_index = idx + 2 
         scaled_src_label = f"e{idx}src"
         scaled_label = f"e{idx}"
         ref_label = f"base{idx}_ref"
@@ -438,11 +440,9 @@ def combine_video_audio_subtitles(
 
     filter_lines.append(f"[{base_label}]{subtitle_filter}[finalv]")
 
-    # Write the filter graph to a file
     fgraph_path = stage_dir / "graph.ffscript"
     fgraph_path.write_text(";\n".join(filter_lines), encoding="utf-8")
 
-    # Assemble final args (short!)
     final_args = (
         ["ffmpeg"]
         + input_args
@@ -458,11 +458,10 @@ def combine_video_audio_subtitles(
             "-c:a", "aac",
             "-b:a", "192k",
             "-shortest",
-            os.path.relpath(str(output_path), str(stage_dir)),  # write to target path via relative
+            os.path.relpath(str(output_path), str(stage_dir)), 
         ]
     )
 
-    # Run with cwd set to stage_dir so everything is short & relative
     run_ffmpeg_command(
         final_args,
         cwd=str(stage_dir),

@@ -25,3 +25,6 @@ ffmpeg/
 
 _ffstage/
 Genshin Emotes/
+AutoCreateContentForWeb/__pycache__/
+AutoCreateMotivationalQuotes/__pycache__/
+AutoSocialMediaPost/__pycache__/
