@@ -217,6 +217,36 @@ def group_segments_into_blocks(segments: list[dict], min_duration: float = 4.0) 
 
     return blocks
 
+
+def generate_youtube_metadata(text: str, openai_key: str) -> tuple[str, str]:
+    """Use OpenAI to generate a catchy YouTube title and description based on the full transcript."""
+    if not openai_key:
+        return "Auto Generated Video", "This video was generated automatically."
+
+    try:
+        from openai import OpenAI
+        import json
+        client = OpenAI(api_key=openai_key)
+        
+        prompt = (
+            "You are a professional YouTube content creator. Read the following video transcript and provide a "
+            "catchy, engaging YouTube video title and a detailed description with hashtags. "
+            "Return the result EXACTLY as a JSON object with two keys: 'title' and 'description'.\n\n"
+            f"Transcript: \"{text}\""
+        )
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+        )
+        data = json.loads(response.choices[0].message.content)
+        return data.get("title", "Auto Generated Video"), data.get("description", "This video was generated automatically.")
+    except Exception as e:
+        print(f"Error generating YouTube metadata: {e}")
+        return "Auto Generated Video", "This video was generated automatically."
+
 def generate_search_query_for_block(text: str, openai_key: str) -> str:
     """Use OpenAI API to generate a concise search query based on the text block."""
     if not openai_key:
@@ -249,7 +279,6 @@ def fetch_from_pexels(query: str, api_key: str, min_width: int, min_height: int)
     if not api_key:
         return None
     
-    print(api_key)
     url = f"https://api.pexels.com/videos/search?query={urllib.parse.quote(query)}&per_page=5"
     req = urllib.request.Request(url, headers={"Authorization": api_key})
     
@@ -259,13 +288,11 @@ def fetch_from_pexels(query: str, api_key: str, min_width: int, min_height: int)
             if not data.get("videos"):
                 return None
             
-            # Try to find a video that somewhat matches the orientation/resolution preference
             videos = data["videos"]
             random.shuffle(videos)
             
             for video in videos:
                 video_files = video.get("video_files", [])
-                # sort by highest quality first
                 video_files.sort(key=lambda x: x.get("width", 0) * x.get("height", 0), reverse=True)
                 for vf in video_files:
                     if vf.get("link"):
@@ -325,7 +352,6 @@ def get_stock_video_url(query: str, pexels_key: str | None, pixabay_key: str | N
             url = fetch_from_pixabay(query, pixabay_key)
             if url: return url
             
-    # Try abstract fallback if query failed
     if query != "abstract background":
         return get_stock_video_url("abstract background", pexels_key, pixabay_key, ratio)
         
@@ -355,7 +381,6 @@ def process_stock_video_for_block(
     target_w = 1920 if ratio == "16:9" else 1080
     target_h = 1080 if ratio == "16:9" else 1920
 
-    # Ensure frame rate is consistent to avoid issues during concat
     fps = 30
     
     filter_complex = [
@@ -369,11 +394,9 @@ def process_stock_video_for_block(
     ]
     
     if duration >= target_duration:
-        # Trim
         cmd.extend(["-t", str(target_duration), "-i", str(input_video)])
         cmd.extend(["-filter_complex", "".join(filter_complex), "-map", "[v_scaled]"])
     else:
-        # Loop (stream_loop instead of complex filter loop for simplicity)
         loops = int(target_duration // duration) + 1
         cmd.extend(["-stream_loop", str(loops), "-i", str(input_video), "-t", str(target_duration)])
         cmd.extend(["-filter_complex", "".join(filter_complex), "-map", "[v_scaled]"])
@@ -383,7 +406,7 @@ def process_stock_video_for_block(
         "-preset", "fast",
         "-crf", "23",
         "-pix_fmt", "yuv420p",
-        "-an", # No audio for the individual clips, we'll lay the master audio later
+        "-an",
         str(output_video)
     ])
     
@@ -402,7 +425,6 @@ def concat_videos(video_paths: list[Path], output_path: Path) -> None:
     list_file = output_path.parent / "concat_list.txt"
     with open(list_file, "w") as f:
         for p in video_paths:
-            # Escape path for ffmpeg concat file
             path_str = str(p.absolute()).replace("\\", "/")
             f.write(f"file '{path_str}'\n")
             
@@ -422,6 +444,8 @@ def combine_pictory_final(
     audio_path: Path,
     subtitles_path: Path,
     output_path: Path,
+    bg_music_path: Path | None = None,
+    music_volume: float = 20.0,
 ) -> None:
     stage_dir = output_path.parent / "_pictory_stage"
     if stage_dir.exists():
@@ -434,7 +458,6 @@ def combine_pictory_final(
     staged_srt = stage_dir / "subs.srt"
     shutil.copy2(subtitles_path, staged_srt)
 
-    # Use the same font style as auto_video_generator.py for consistency
     script_fonts = Path(__file__).parent / "fonts"
     if script_fonts.exists():
         shutil.copytree(script_fonts, stage_dir / "fonts")
@@ -452,7 +475,6 @@ def combine_pictory_final(
         "MarginV=40"
     )
     
-    # We may or may not have a fonts dir depending on user setup
     fontsdir_opt = "fontsdir='fonts':" if script_fonts.exists() else ""
     subtitle_filter = f"subtitles=filename='subs.srt':{fontsdir_opt}force_style='{genshin_force_style}'"
 
@@ -460,6 +482,18 @@ def combine_pictory_final(
         "ffmpeg", "-y",
         "-i", rel_video,
         "-i", rel_audio,
+    ]
+    
+    if bg_music_path and bg_music_path.exists() and music_volume > 0:
+        rel_bg = os.path.relpath(str(bg_music_path), str(stage_dir))
+        cmd.extend(["-stream_loop", "-1", "-i", rel_bg])
+        vol = music_volume / 100.0
+        audio_filter = f"[2:a]volume={vol}[bg];[1:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+        cmd.extend(["-filter_complex", audio_filter, "-map", "0:v", "-map", "[aout]"])
+    else:
+        cmd.extend(["-map", "0:v", "-map", "1:a"])
+
+    cmd.extend([
         "-vf", subtitle_filter,
         "-c:v", "libx264",
         "-preset", "medium",
@@ -469,7 +503,7 @@ def combine_pictory_final(
         "-b:a", "192k",
         "-shortest",
         os.path.relpath(str(output_path), str(stage_dir))
-    ]
+    ])
     
     audio_secs = get_media_duration_seconds(audio_path)
     run_ffmpeg_command(
@@ -486,7 +520,12 @@ def run_pictory_pipeline(
     ratio: str = "16:9",
     model: str = "base",
     language: str | None = None,
-    keep_temp: bool = False
+    keep_temp: bool = False,
+    bg_music_path: Path | None = None,
+    music_volume: float = 20.0,
+    upload_to_youtube: bool = False,
+    youtube_channel_name: str | None = None,
+    youtube_channel_url: str | None = None
 ) -> None:
     ensure_ffmpeg_available()
     
@@ -513,8 +552,7 @@ def run_pictory_pipeline(
 
     if not audio_source.exists():
         raise FileNotFoundError(f"Audio source file not found: {audio_source}")
-    
-    print(pexels_key, pixabay_key)
+        
     print(f"Starting Pictory Generator for {audio_source}")
     
     temp_dir_context = tempfile.TemporaryDirectory() if not keep_temp else None
@@ -581,9 +619,28 @@ def run_pictory_pipeline(
         concat_videos(processed_blocks, stitched_visual_path)
         
         print("\nFinal Compositing (Audio + Visual + Subtitles)...", flush=True)
-        combine_pictory_final(stitched_visual_path, audio_path, srt_path, output_video)
+        combine_pictory_final(stitched_visual_path, audio_path, srt_path, output_video, bg_music_path, music_volume)
         print(f"\nFinal video written to {output_video}")
         
+        stage_dir = output_video.parent / "_pictory_stage"
+        if not keep_temp and stage_dir.exists():
+            import shutil
+            shutil.rmtree(stage_dir, ignore_errors=True)
+        
+        if upload_to_youtube and youtube_channel_url:
+            print("\nGenerating YouTube Title & Description...")
+            full_transcript = " ".join([seg["text"] for seg in segments])
+            yt_title, yt_desc = generate_youtube_metadata(full_transcript, openai_key)
+            print(f"Title: {yt_title}")
+            
+            try:
+                from youtube_uploader import upload_to_youtube as yt_upload
+                yt_upload(output_video, yt_title, yt_desc, youtube_channel_name, youtube_channel_url)
+            except ImportError:
+                print("Warning: youtube_uploader module not found. Skipping YouTube upload.")
+            except Exception as e:
+                print(f"YouTube Upload failed: {e}")
+                
     finally:
         if temp_dir_context is not None:
             temp_dir_context.cleanup()
